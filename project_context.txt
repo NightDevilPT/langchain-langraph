@@ -1,0 +1,659 @@
+================================================================================
+PROJECT CONTEXT FILE
+Generated: scripts
+================================================================================
+
+PROJECT STRUCTURE
+--------------------------------------------------------------------------------
+  .env.example
+  .gitignore
+  agents\__init__.py
+  agents\weather\__init__.py
+  agents\weather\agent.py
+  agents\weather\tools\__init__.py
+  agents\weather\tools\forecast.py
+  agents\weather\tools\humidity.py
+  agents\weather\tools\weather.py
+  middleware\__init__.py
+  middleware\logging.py
+  project_context.txt
+  Readme.md
+  requirements.txt
+  run.py
+  shared\__init__.py
+  shared\config.py
+  shared\llm.py
+
+================================================================================
+
+FILE: .env.example
+--------------------------------------------------------------------------------
+DOCKER_MODEL_RUNNER_URL=http://localhost:12434/engines/v1
+DOCKER_MODEL=ai/qwen2.5
+MODEL_TEMPERATURE=0.7
+--------------------------------------------------------------------------------
+
+FILE: .gitignore
+--------------------------------------------------------------------------------
+.venv/
+.env
+__pycache__/
+*.pyc
+.DS_Store
+--------------------------------------------------------------------------------
+
+FILE: agents\__init__.py
+--------------------------------------------------------------------------------
+# agents/__init__.py
+"""
+LangChain Agents Package
+Add new agents as subdirectories here.
+Example: agents/research/, agents/code_assistant/
+"""
+__all__ = []
+--------------------------------------------------------------------------------
+
+FILE: agents\weather\__init__.py
+--------------------------------------------------------------------------------
+# agents/weather/__init__.py
+# Don't import agent here to avoid circular imports
+__all__ = []
+--------------------------------------------------------------------------------
+
+FILE: agents\weather\agent.py
+--------------------------------------------------------------------------------
+# agents/weather/agent.py
+from langchain.agents import create_agent
+from shared.llm import get_llm
+from tools import get_weather, get_forecast, get_humidity
+from middleware import (
+    log_before_agent,
+    log_after_agent,
+    log_before_model,
+    log_after_model,
+    log_wrap_model_call,
+    log_wrap_tool_call,
+)
+
+# Create the agent with all weather tools
+agent = create_agent(
+    model=get_llm(),
+    tools=[get_weather, get_forecast, get_humidity],
+    system_prompt="""You are a helpful weather assistant. 
+    You can provide current weather, forecasts, and humidity information for various cities.
+    Use the appropriate tool based on what the user asks for.""",
+    middleware=[
+        log_before_agent,
+        log_after_agent,
+        log_before_model,
+        log_after_model,
+        log_wrap_model_call,
+        log_wrap_tool_call,
+    ],
+)
+
+# Run the agent
+if __name__ == "__main__":
+    print("\nWeather Agent with Multiple Tools\n" + "="*50)
+    
+    result = agent.invoke(
+        {"messages": [{"role": "user", "content": "What's the weather in San Francisco and what will it be like for the next 2 days?"}]}
+    )
+    
+    # Print final response
+    if result and "messages" in result:
+        last_message = result["messages"][-1]
+        content = last_message.content if hasattr(last_message, 'content') else str(last_message)
+        print(f"\n✅ Final Answer: {content}")
+--------------------------------------------------------------------------------
+
+FILE: agents\weather\tools\__init__.py
+--------------------------------------------------------------------------------
+# agents/weather/tools/__init__.py
+from .weather import get_weather
+from .forecast import get_forecast
+from .humidity import get_humidity
+
+__all__ = ["get_weather", "get_forecast", "get_humidity"]
+--------------------------------------------------------------------------------
+
+FILE: agents\weather\tools\forecast.py
+--------------------------------------------------------------------------------
+# agents/weather/tools/forecast.py
+from langchain.tools import tool
+
+
+@tool
+def get_forecast(city: str, days: int = 3) -> str:
+    """Get weather forecast for a given city for specified number of days."""
+    forecast_data = {
+        "San Francisco": ["Sunny, 68°F", "Cloudy, 65°F", "Foggy, 62°F"],
+        "New York": ["Cloudy, 45°F", "Rainy, 42°F", "Snowy, 38°F"],
+        "London": ["Rainy, 52°F", "Rainy, 50°F", "Cloudy, 48°F"],
+    }
+    
+    if city in forecast_data:
+        forecast = forecast_data[city][:days]
+        return f"{days}-day forecast for {city}: {', '.join(forecast)}"
+    return f"{days}-day forecast for {city}: Partly cloudy, around 60°F"
+--------------------------------------------------------------------------------
+
+FILE: agents\weather\tools\humidity.py
+--------------------------------------------------------------------------------
+# agents/weather/tools/humidity.py
+from langchain.tools import tool
+
+
+@tool
+def get_humidity(city: str) -> str:
+    """Get humidity level for a given city."""
+    humidity_data = {
+        "San Francisco": "75%",
+        "New York": "65%",
+        "London": "85%",
+        "Tokyo": "60%",
+    }
+    humidity = humidity_data.get(city, "70%")
+    return f"Humidity in {city}: {humidity}"
+--------------------------------------------------------------------------------
+
+FILE: agents\weather\tools\weather.py
+--------------------------------------------------------------------------------
+# agents/weather/tools/weather.py
+from langchain.tools import tool
+
+
+@tool
+def get_weather(city: str) -> str:
+    """Get current weather for a given city."""
+    weather_data = {
+        "San Francisco": "Sunny, 68°F",
+        "New York": "Cloudy, 45°F",
+        "London": "Rainy, 52°F",
+        "Tokyo": "Clear, 70°F",
+        "Paris": "Partly cloudy, 60°F",
+        "Sydney": "Sunny, 75°F",
+    }
+    return weather_data.get(city, f"Partly cloudy, 60°F in {city}")
+--------------------------------------------------------------------------------
+
+FILE: middleware\__init__.py
+--------------------------------------------------------------------------------
+from .logging import (
+    log_before_agent,
+    log_after_agent,
+    log_before_model,
+    log_after_model,
+    log_wrap_model_call,
+    log_wrap_tool_call,
+)
+
+__all__ = [
+    "log_before_agent",
+    "log_after_agent",
+    "log_before_model",
+    "log_after_model",
+    "log_wrap_model_call",
+    "log_wrap_tool_call",
+]
+--------------------------------------------------------------------------------
+
+FILE: middleware\logging.py
+--------------------------------------------------------------------------------
+import time
+import json
+import threading
+from datetime import datetime
+from typing import Any, Callable, Optional
+
+from langchain.agents.middleware import (
+    before_agent,
+    after_agent,
+    before_model,
+    after_model,
+    wrap_model_call,
+    wrap_tool_call,
+    AgentState,
+    ModelRequest,
+    ModelResponse,
+)
+from langchain.tools.tool_node import ToolCallRequest
+from langchain.messages import ToolMessage
+from langgraph.types import Command
+from langgraph.runtime import Runtime
+
+
+# ── Global session state ──────────────────────────────────────────────────────
+model_call_count    = 0
+tool_call_count     = 0
+session_start_time  = None
+total_input_tokens  = 0
+total_output_tokens = 0
+total_tokens        = 0
+
+# Lock prevents parallel tool calls from interleaving their output
+_print_lock = threading.Lock()
+
+
+# ── ANSI colours ──────────────────────────────────────────────────────────────
+class Colors:
+    PURPLE = "\033[95m"
+    BLUE   = "\033[94m"
+    CYAN   = "\033[96m"
+    GREEN  = "\033[92m"
+    YELLOW = "\033[93m"
+    RED    = "\033[91m"
+    ORANGE = "\033[38;5;208m"
+    BOLD   = "\033[1m"
+    DIM    = "\033[2m"
+    RESET  = "\033[0m"
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+def _divider(phase: str, color: str = Colors.CYAN) -> None:
+    print(f"\n{color}{'=' * 60}{Colors.RESET}")
+    print(f"{color}{Colors.BOLD}  {phase}{Colors.RESET}")
+    print(f"{color}{'=' * 60}{Colors.RESET}")
+
+
+def _log_table(rows: list, title: str = None, color: str = Colors.CYAN) -> None:
+    if title:
+        print(f"\n{color}{Colors.BOLD}{title}{Colors.RESET}")
+        print(f"{color}{'-' * 50}{Colors.RESET}")
+    for row in rows:
+        if isinstance(row, tuple):
+            key, value = row
+            print(f"{color}{key:<25}{Colors.RESET}{value}")
+        else:
+            print(f"{color}{row}{Colors.RESET}")
+    print(f"{color}{'-' * 50}{Colors.RESET}")
+
+
+def _get_user_input(state: AgentState) -> str:
+    for msg in reversed(state.get("messages", [])):
+        if hasattr(msg, "type") and msg.type == "human":
+            content = msg.content
+            return content[:200] + "..." if len(content) > 200 else content
+    return "N/A"
+
+
+def _collect_tokens(last_msg) -> tuple[int, int]:
+    input_tokens  = 0
+    output_tokens = 0
+    if not last_msg:
+        return input_tokens, output_tokens
+    meta = getattr(last_msg, "response_metadata", {}) or {}
+    for key in ("token_usage", "usage"):
+        if key in meta:
+            usage         = meta[key]
+            input_tokens  = usage.get("prompt_tokens", 0)
+            output_tokens = usage.get("completion_tokens", 0)
+            break
+    return input_tokens, output_tokens
+
+
+# ── Middleware hooks ──────────────────────────────────────────────────────────
+@before_agent
+def log_before_agent(state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
+    global session_start_time, model_call_count, tool_call_count
+    global total_input_tokens, total_output_tokens, total_tokens
+
+    session_start_time  = time.time()
+    model_call_count    = 0
+    tool_call_count     = 0
+    total_input_tokens  = 0
+    total_output_tokens = 0
+    total_tokens        = 0
+
+    _divider("BEFORE_AGENT", Colors.PURPLE)
+    _log_table(
+        [
+            ("Event:",            "Agent Session Started"),
+            ("Timestamp:",        datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+            ("Session ID:",       str(id(state))[:8]),
+            ("Initial Messages:", str(len(state.get("messages", [])))),
+        ],
+        "SESSION INITIALIZATION",
+        Colors.PURPLE,
+    )
+    return None
+
+
+@before_model
+def log_before_model(state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
+    global model_call_count
+    model_call_count += 1
+
+    _divider("BEFORE_MODEL", Colors.BLUE)
+    _log_table(
+        [
+            ("Call Number:",    f"#{model_call_count}"),
+            ("Timestamp:",      datetime.now().strftime("%H:%M:%S.%f")[:-3]),
+            ("Total Messages:", str(len(state.get("messages", [])))),
+            ("User Input:",     _get_user_input(state)),
+        ],
+        "MODEL REQUEST",
+        Colors.BLUE,
+    )
+    return None
+
+
+@wrap_model_call
+def log_wrap_model_call(
+    request: ModelRequest,
+    handler: Callable[[ModelRequest], ModelResponse],
+) -> ModelResponse:
+    _divider("WRAP_MODEL_CALL", Colors.CYAN)
+
+    start = time.time()
+    rows  = [
+        ("Messages in Request:", str(len(request.messages))),
+        ("Start Time:",          datetime.now().strftime("%H:%M:%S.%f")[:-3]),
+    ]
+
+    try:
+        response = handler(request)
+        rows += [
+            ("Execution Time:", f"{time.time() - start:.3f} seconds"),
+            ("Status:",         "SUCCESS"),
+        ]
+        _log_table(rows, "MODEL WRAPPER", Colors.CYAN)
+        return response
+    except Exception as e:
+        rows += [("Status:", "FAILED"), ("Error:", str(e))]
+        _log_table(rows, "MODEL WRAPPER", Colors.RED)
+        raise
+
+
+@after_model
+def log_after_model(state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
+    global total_input_tokens, total_output_tokens, total_tokens
+
+    _divider("AFTER_MODEL", Colors.BLUE)
+
+    messages = state.get("messages", [])
+    last_msg = messages[-1] if messages else None
+
+    # accumulate tokens for summary
+    inp, out = _collect_tokens(last_msg)
+    total_input_tokens  += inp
+    total_output_tokens += out
+    total_tokens         = total_input_tokens + total_output_tokens
+
+    rows = [
+        ("Call Number:", f"#{model_call_count}"),
+        ("Timestamp:",   datetime.now().strftime("%H:%M:%S.%f")[:-3]),
+    ]
+
+    if last_msg:
+        if getattr(last_msg, "content", None):
+            content = last_msg.content
+            rows.append(("\nAI Response:", f"\n{content[:300]}"))
+        elif getattr(last_msg, "tool_calls", None):
+            names = [tc.get("name", "unknown") for tc in last_msg.tool_calls]
+            rows.append(("AI Decision:", f"Calling tool(s): {', '.join(names)}"))
+
+    _log_table(rows, "MODEL RESPONSE", Colors.BLUE)
+    return None
+
+
+@wrap_tool_call
+def log_wrap_tool_call(
+    request: ToolCallRequest,
+    handler: Callable[[ToolCallRequest], ToolMessage | Command],
+) -> ToolMessage | Command:
+    global tool_call_count
+
+    tool_name = request.tool_call.get("name", "unknown")
+    tool_args = request.tool_call.get("args", {})
+
+    # ── Acquire lock so parallel tools never interleave output ────────────────
+    with _print_lock:
+        tool_call_count += 1
+        current_call = tool_call_count
+
+        _divider("WRAP_TOOL_CALL", Colors.ORANGE)
+
+        start = time.time()
+        rows  = [
+            ("Call Number:", f"#{current_call}"),
+            ("Tool Name:",   tool_name),
+            ("Arguments:",   json.dumps(tool_args, ensure_ascii=False)[:200]),
+            ("Start Time:",  datetime.now().strftime("%H:%M:%S.%f")[:-3]),
+        ]
+
+        try:
+            result   = handler(request)
+            duration = time.time() - start
+
+            rows.append(("Execution Time:", f"{duration:.3f} seconds"))
+
+            if isinstance(result, ToolMessage):
+                output = str(result.content)
+                rows += [
+                    ("Output:",  output[:200] + ("..." if len(output) > 200 else "")),
+                    ("Status:",  "SUCCESS"),
+                ]
+            else:
+                rows.append(("Status:", "SUCCESS (Command)"))
+
+            _log_table(rows, f"TOOL EXECUTION  [{tool_name}]", Colors.ORANGE)
+            return result
+
+        except Exception as e:
+            rows += [("Status:", "FAILED"), ("Error:", str(e))]
+            _log_table(rows, f"TOOL EXECUTION  [{tool_name}]", Colors.RED)
+            raise
+
+
+@after_agent
+def log_after_agent(state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
+    duration = time.time() - session_start_time if session_start_time else 0
+
+    _divider("AFTER_AGENT", Colors.PURPLE)
+
+    rows = [
+        ("Session Duration:",    f"{duration:.2f} seconds"),
+        ("Total Model Calls:",   str(model_call_count)),
+        ("Total Tool Calls:",    str(tool_call_count)),
+        ("Total Input Tokens:",  str(total_input_tokens)),
+        ("Total Output Tokens:", str(total_output_tokens)),
+        ("Total Tokens Used:",   str(total_tokens)),
+    ]
+
+    if duration > 0 and total_tokens > 0:
+        rows.append(("Average Speed:", f"{total_tokens / duration:.1f} tokens/sec"))
+
+    _log_table(rows, "SESSION SUMMARY", Colors.PURPLE)
+    return None
+--------------------------------------------------------------------------------
+
+FILE: project_context.txt
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+
+FILE: Readme.md
+--------------------------------------------------------------------------------
+Here's the updated README.md:
+
+```markdown
+# LangChain Agents with Docker Model Runner
+
+## Commands
+
+```bash
+python run.py              # Show help
+python run.py setup        # Setup environment (auto-opens venv terminal)
+python run.py list         # List all agents  
+python run.py venv         # Open new terminal with venv activated
+python run.py quick_agent  # Run an agent
+```
+
+## Setup
+
+1. Pull a model:
+```bash
+docker model pull ai/qwen2.5
+```
+
+2. Setup project:
+```bash
+python run.py setup
+```
+*This automatically opens a new terminal with virtual environment activated*
+
+3. Copy `.env.example` to `.env` and edit it
+
+4. Or manually activate venv anytime:
+```bash
+python run.py venv         # Opens new terminal with venv
+# OR
+.venv\Scripts\activate     # Manual activation (Windows)
+source .venv/bin/activate  # Manual activation (Mac/Linux)
+```
+
+## Project Structure
+
+```
+langchain-langraph/
+├── run.py
+├── requirements.txt  
+├── .env
+├── shared/
+│   ├── config.py
+│   └── llm.py
+└── agents/
+    └── quick_agent/
+        ├── agent.py
+        └── tools/
+            └── get_weather.py
+```
+
+--------------------------------------------------------------------------------
+
+FILE: requirements.txt
+--------------------------------------------------------------------------------
+langchain
+langchain-openai
+langchain-core
+pydantic
+python-dotenv
+--------------------------------------------------------------------------------
+
+FILE: run.py
+--------------------------------------------------------------------------------
+import os
+import sys
+import subprocess
+from pathlib import Path
+
+ROOT       = Path(__file__).parent
+AGENTS_DIR = ROOT / "agents"
+VENV_DIR   = ROOT / ".venv"
+PYTHON     = VENV_DIR / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+PIP        = VENV_DIR / ("Scripts/pip.exe" if os.name == "nt" else "bin/pip")
+
+def setup():
+    if not VENV_DIR.exists():
+        print("📦 Creating virtual environment...")
+        subprocess.run([sys.executable, "-m", "venv", str(VENV_DIR)], check=True)
+    else:
+        print("✅ Virtual environment already exists")
+    
+    print("📦 Upgrading pip...")
+    subprocess.run([str(PYTHON), "-m", "pip", "install", "--upgrade", "pip"], check=True)
+    
+    print("📦 Installing requirements...")
+    subprocess.run([str(PYTHON), "-m", "pip", "install", "-r", str(ROOT / "requirements.txt")], check=True)
+    
+    activate_cmd = r".venv\Scripts\activate" if os.name == "nt" else "source .venv/bin/activate"
+    print(f"\n✅ Setup complete!")
+    print(f"\n💡 Activate virtual environment in THIS terminal with: {activate_cmd}")
+
+def list_agents():
+    if not AGENTS_DIR.exists():
+        print("📁 No agents directory found")
+        return
+    
+    agents = [d.name for d in AGENTS_DIR.iterdir() if d.is_dir() and (d / "agent.py").exists()]
+    
+    if not agents:
+        print("📁 No agents found")
+    else:
+        print("\n📁 Available agents:")
+        for agent in sorted(agents):
+            print(f"  python ./run.py {agent}")
+
+def run(agent_name: str):
+    agent_path = AGENTS_DIR / agent_name / "agent.py"
+    if not agent_path.exists():
+        print(f"❌ Agent '{agent_name}' not found.\n")
+        list_agents()
+        sys.exit(1)
+    
+    env = os.environ.copy()
+    env['PYTHONPATH'] = str(ROOT) + os.pathsep + env.get('PYTHONPATH', '')
+    
+    print(f"\n🚀 Running agent: {agent_name}\n{'─' * 50}")
+    subprocess.run([str(PYTHON), str(agent_path)], env=env)
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: python run.py [setup | list | <agent_name>]\n")
+        print("Commands:")
+        print("  setup              - Setup virtual environment")
+        print("  list               - List all available agents")
+        print("  <agent_name>       - Run a specific agent")
+        print("\nAfter setup, activate venv manually:")
+        print("  .venv\\Scripts\\activate  # Windows")
+        print("  source .venv/bin/activate  # Mac/Linux")
+        sys.exit(0)
+    
+    cmd = sys.argv[1]
+    
+    if cmd == "setup":
+        setup()
+    elif cmd == "list":
+        list_agents()
+    else:
+        run(cmd)
+--------------------------------------------------------------------------------
+
+FILE: shared\__init__.py
+--------------------------------------------------------------------------------
+# shared/__init__.py
+from .config import DOCKER_MODEL_RUNNER_URL, DOCKER_MODEL, MODEL_TEMPERATURE
+from .llm import get_llm
+
+__all__ = ["get_llm", "DOCKER_MODEL_RUNNER_URL", "DOCKER_MODEL", "MODEL_TEMPERATURE"]
+--------------------------------------------------------------------------------
+
+FILE: shared\config.py
+--------------------------------------------------------------------------------
+# shared/config.py
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+DOCKER_MODEL_RUNNER_URL = os.getenv("DOCKER_MODEL_RUNNER_URL", "http://localhost:12434/engines/v1")
+DOCKER_MODEL = os.getenv("DOCKER_MODEL", "ai/qwen2.5")
+MODEL_TEMPERATURE = float(os.getenv("MODEL_TEMPERATURE", "0.7"))
+--------------------------------------------------------------------------------
+
+FILE: shared\llm.py
+--------------------------------------------------------------------------------
+# shared/llm.py
+from langchain_openai import ChatOpenAI
+from shared.config import DOCKER_MODEL_RUNNER_URL, DOCKER_MODEL, MODEL_TEMPERATURE
+
+def get_llm():
+    return ChatOpenAI(
+        base_url=DOCKER_MODEL_RUNNER_URL,
+        api_key="dummy",
+        model=DOCKER_MODEL,
+        temperature=MODEL_TEMPERATURE,
+    )
+--------------------------------------------------------------------------------
+

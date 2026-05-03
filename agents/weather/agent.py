@@ -1,7 +1,7 @@
 # agents/weather/agent.py
 from langchain.agents import create_agent
 from shared.llm import get_llm
-from agents.weather.tools import get_weather, get_forecast, get_humidity
+from tools import get_weather, get_forecast, get_humidity
 from middleware import (
     log_before_agent,
     log_after_agent,
@@ -30,7 +30,7 @@ agent = create_agent(
 
 # Run the agent
 if __name__ == "__main__":
-    print("\n🌤️  Weather Agent with Multiple Tools\n" + "="*50)
+    print("\nWeather Agent with Multiple Tools\n" + "="*50)
     
     result = agent.invoke(
         {"messages": [{"role": "user", "content": "What's the weather in San Francisco and what will it be like for the next 2 days?"}]}
